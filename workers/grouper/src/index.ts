@@ -31,14 +31,26 @@ export default class GrouperWorker extends Worker {
   private db: DatabaseController = new DatabaseController(process.env.MONGO_EVENTS_DATABASE_URI);
 
   /**
+   * Memoized Hashing computation
+   */
+  private static cachedHashValues: {[key: string]: string} = {};
+
+  /**
    * Get unique hash from event data
    *
    * @param task - worker task to create hash
    */
   private static getUniqueEventHash(task: GroupWorkerTask): string {
-    return crypto.createHmac('sha256', process.env.EVENT_SECRET)
-      .update(task.catcherType + task.event.title)
-      .digest('hex');
+    const computedHashValueCacheKey = `${task.catcherType}:${task.event.title}`;
+
+    if (!this.cachedHashValues[computedHashValueCacheKey]) {
+      this.cachedHashValues[computedHashValueCacheKey] = crypto.createHmac('sha256', process.env.EVENT_SECRET)
+        .update(task.catcherType + task.event.title)
+        .digest('hex');
+    }
+
+    return this.cachedHashValues[computedHashValueCacheKey];
+
   }
 
   /**
@@ -46,6 +58,7 @@ export default class GrouperWorker extends Worker {
    */
   public async start(): Promise<void> {
     await this.db.connect();
+    this.prepareCache();
     await super.start();
   }
 
@@ -167,11 +180,14 @@ export default class GrouperWorker extends Worker {
     if (isUserFromOriginalEvent) {
       return false;
     } else {
-      const repetition = await this.db.getConnection().collection(`repetitions:${task.projectId}`)
-        .findOne({
-          groupHash: existedEvent.groupHash,
-          'payload.user.id': eventUser.id,
-        });
+      const repetitionCacheKey = `repetitions:${task.projectId}:${existedEvent.groupHash}:${eventUser.id}`;
+      const repetition = this.cache.get(repetitionCacheKey, () => {
+        return this.db.getConnection().collection(`repetitions:${task.projectId}`)
+          .findOne({
+            groupHash: existedEvent.groupHash,
+            'payload.user.id': eventUser.id,
+          });
+      })
 
       /**
        * If there is no repetitions from this user — return true
@@ -191,13 +207,15 @@ export default class GrouperWorker extends Worker {
       throw new ValidationError('Controller.saveEvent: Project ID is invalid or missed');
     }
 
-    try {
+    const eventCacheKey = `${projectId}:${query.toString()}`
+    return this.cache.get(eventCacheKey, () => {
       return this.db.getConnection()
         .collection(`events:${projectId}`)
-        .findOne(query);
-    } catch (err) {
-      throw new DatabaseReadWriteError(err);
-    }
+        .findOne(query)
+        .catch((err) => {
+          throw new DatabaseReadWriteError(err);
+        })
+    });
   }
 
   /**
