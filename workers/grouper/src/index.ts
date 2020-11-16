@@ -6,9 +6,15 @@ import { Worker } from '../../../lib/worker';
 import * as WorkerNames from '../../../lib/workerNames';
 import * as pkg from '../package.json';
 import { GroupWorkerTask } from '../types/group-worker-task';
-import { GroupedEvent } from '../types/grouped-event';
-import { Repetition } from '../types/repetition';
+import { GroupedEventDBScheme, RepetitionDBScheme } from 'hawk.types';
 import { DatabaseReadWriteError, ValidationError } from '../../../lib/workerErrors';
+import { decodeUnsafeFields, encodeUnsafeFields } from '../../../lib/utils/unsafeFields';
+import HawkCatcher from '@hawk.so/nodejs';
+
+/**
+ * Error code of MongoDB key duplication error
+ */
+const DB_DUPLICATE_KEY_ERROR = '11000';
 
 /**
  * Worker for handling Javascript events
@@ -23,11 +29,6 @@ export default class GrouperWorker extends Worker {
    * Database Controller
    */
   private db: DatabaseController = new DatabaseController(process.env.MONGO_EVENTS_DATABASE_URI);
-
-  /**
-   * Index name for payload.user.id field
-   */
-  private readonly userIdIndexName = 'userId';
 
   /**
    * Get unique hash from event data
@@ -64,28 +65,6 @@ export default class GrouperWorker extends Worker {
   public async handle(task: GroupWorkerTask): Promise<void> {
     const uniqueEventHash = GrouperWorker.getUniqueEventHash(task);
 
-    // eslint-disable-next-line jsdoc/check-values
-    /**
-     * @since April 01, 2020
-     * Do not save event with unexpected structure caused due to js-vue integration
-     * @todo remove after changing payload data format
-     */
-    if (task.event.title === 'this.editor is undefined' && task.event.addons) {
-      interface VueAddonsData {
-        lifecycle: string;
-        component: string;
-        data: object;
-        props: object;
-        computed: object;
-      }
-
-      const vueAddons = (task.event.addons as { vue: VueAddonsData }).vue;
-
-      if (vueAddons && vueAddons.data) {
-        (task.event.addons as { vue: VueAddonsData }).vue.data = {};
-      }
-    }
-
     /**
      * Find event by group hash.
      */
@@ -101,16 +80,29 @@ export default class GrouperWorker extends Worker {
     let repetitionId = null;
 
     if (isFirstOccurrence) {
-      /**
-       * Insert new event
-       */
-      await this.saveEvent(task.projectId, {
-        groupHash: uniqueEventHash,
-        totalCount: 1,
-        catcherType: task.catcherType,
-        payload: task.event,
-        usersAffected: 1,
-      } as GroupedEvent);
+      try {
+        /**
+         * Insert new event
+         */
+        await this.saveEvent(task.projectId, {
+          groupHash: uniqueEventHash,
+          totalCount: 1,
+          catcherType: task.catcherType,
+          payload: task.event,
+          usersAffected: 1,
+        } as GroupedEventDBScheme);
+      } catch (e) {
+        /**
+         * If we caught Database duplication error, then another worker thread has already saved it to the database
+         * and we need to process this event as repetition
+         */
+        if (e.code.toString() === DB_DUPLICATE_KEY_ERROR) {
+          HawkCatcher.send(new Error('[Grouper] MongoError: E11000 duplicate key error collection'));
+          await this.handle(task);
+        } else {
+          throw e;
+        }
+      }
     } else {
       const incrementAffectedUsers = await this.shouldIncrementAffectedUsers(task, existedEvent);
 
@@ -122,13 +114,18 @@ export default class GrouperWorker extends Worker {
       }, incrementAffectedUsers);
 
       /**
+       * Decode existed event to calculate diffs correctly
+       */
+      decodeUnsafeFields(existedEvent);
+
+      /**
        * Save event's repetitions
        */
       const diff = utils.deepDiff(existedEvent.payload, task.event);
       const newRepetition = {
         groupHash: uniqueEventHash,
         payload: diff,
-      } as Repetition;
+      } as RepetitionDBScheme;
 
       repetitionId = await this.saveRepetition(task.projectId, newRepetition);
     }
@@ -159,7 +156,7 @@ export default class GrouperWorker extends Worker {
    * @param task - worker task to process
    * @param existedEvent - original event to get its user
    */
-  private async shouldIncrementAffectedUsers(task: GroupWorkerTask, existedEvent: GroupedEvent): Promise<boolean> {
+  private async shouldIncrementAffectedUsers(task: GroupWorkerTask, existedEvent: GroupedEventDBScheme): Promise<boolean> {
     const eventUser = task.event.user;
 
     if (!eventUser) {
@@ -189,7 +186,7 @@ export default class GrouperWorker extends Worker {
    * @param projectId - project's identifier
    * @param query - mongo query string
    */
-  private async getEvent(projectId: string, query): Promise<GroupedEvent> {
+  private async getEvent(projectId: string, query): Promise<GroupedEventDBScheme> {
     if (!mongodb.ObjectID.isValid(projectId)) {
       throw new ValidationError('Controller.saveEvent: Project ID is invalid or missed');
     }
@@ -211,55 +208,36 @@ export default class GrouperWorker extends Worker {
    * @throws {ValidationError} if `projectID` is not provided or invalid
    * @throws {ValidationError} if `eventData` is not a valid object
    */
-  private async saveEvent(projectId: string, groupedEventData: GroupedEvent): Promise<mongodb.ObjectID> {
+  private async saveEvent(projectId: string, groupedEventData: GroupedEventDBScheme): Promise<mongodb.ObjectID> {
     if (!projectId || !mongodb.ObjectID.isValid(projectId)) {
       throw new ValidationError('Controller.saveEvent: Project ID is invalid or missed');
     }
 
-    try {
-      return (await this.db.getConnection()
-        .collection(`events:${projectId}`)
-        .insertOne(groupedEventData)).insertedId as mongodb.ObjectID;
-    } catch (err) {
-      throw new DatabaseReadWriteError(err);
-    }
+    const collection = this.db.getConnection().collection(`events:${projectId}`);
+
+    encodeUnsafeFields(groupedEventData);
+
+    return (await collection
+      .insertOne(groupedEventData)).insertedId as mongodb.ObjectID;
   }
 
   /**
    * Inserts unique event repetition to the database
    *
    * @param projectId - project's identifier
-   * @param {Repetition} repetition - object that contains only difference with first event
+   * @param {RepetitionDBScheme} repetition - object that contains only difference with first event
    */
-  private async saveRepetition(projectId: string, repetition: Repetition): Promise<mongodb.ObjectID> {
+  private async saveRepetition(projectId: string, repetition: RepetitionDBScheme): Promise<mongodb.ObjectID> {
     if (!projectId || !mongodb.ObjectID.isValid(projectId)) {
       throw new ValidationError('Controller.saveRepetition: Project ID is invalid or missing');
     }
 
     try {
       const collection = this.db.getConnection().collection(`repetitions:${projectId}`);
-      const result = (await collection.insertOne(repetition)).insertedId as mongodb.ObjectID;
 
-      const hasIndex = await collection.indexExists('groupHash_hashed');
+      encodeUnsafeFields(repetition);
 
-      if (!hasIndex) {
-        await collection.createIndex({
-          groupHash: 'hashed',
-        });
-      }
-
-      const hasUserIdIndex = await collection.indexExists(this.userIdIndexName);
-
-      if (!hasUserIdIndex) {
-        await collection.createIndex({
-          'payload.user.id': 1,
-        }, {
-          name: this.userIdIndexName,
-          sparse: true,
-        });
-      }
-
-      return result;
+      return (await collection.insertOne(repetition)).insertedId as mongodb.ObjectID;
     } catch (err) {
       throw new DatabaseReadWriteError(err);
     }

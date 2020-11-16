@@ -1,18 +1,27 @@
-import { GroupedEvent } from 'hawk-worker-grouper/types/grouped-event';
+import { GroupedEventDBScheme } from 'hawk.types';
 import { WhatToReceive } from 'hawk-worker-notifier/src/validator';
-import { ObjectID } from 'mongodb';
+import { ObjectId } from 'mongodb';
 import '../../../env-test';
+import dotenv from 'dotenv';
+import path from 'path';
+
+/**
+ * Load local environment configuration
+ */
+const testEnv = dotenv.config({ path: path.resolve(__dirname, '../.env.test') }).parsed;
+
+Object.assign(process.env, testEnv);
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const projectQueryMock = jest.fn(() => ({
-  _id: new ObjectID('5e3eef0679fa3700a0198a49'),
+  _id: new ObjectId('5e3eef0679fa3700a0198a49'),
   name: 'Project',
   notifications: [
     {
-      _id: new ObjectID('5e3eef0679fa3700a0198a49'),
+      _id: new ObjectId('5e3eef0679fa3700a0198a49'),
       isEnabled: true,
-      uidAdded: new ObjectID('5e3eef0679fa3700a0198a49'),
+      uidAdded: new ObjectId('5e3eef0679fa3700a0198a49'),
       whatToReceive: WhatToReceive.All,
       including: [],
       excluding: [],
@@ -63,7 +72,7 @@ const eventsQueryMock = jest.fn(() => ({
       } ],
     } ],
   },
-} as GroupedEvent));
+} as GroupedEventDBScheme));
 const dailyEventsQueryMock = jest.fn(() => 1);
 
 const dbCollectionMock = jest.fn((collection: string) => {
@@ -190,7 +199,7 @@ describe('Sender Worker', () => {
         } ],
       });
 
-      expect(projectQueryMock).toBeCalledWith({ _id: new ObjectID('5e3eef0679fa3700a0198a49') });
+      expect(projectQueryMock).toBeCalledWith({ _id: new ObjectId('5e3eef0679fa3700a0198a49') });
     });
 
     /**

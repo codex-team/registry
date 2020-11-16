@@ -7,53 +7,13 @@
  */
 export enum EventType {
   /**
-   * Daily check event
+   * Workspace plan charge event to purchase plan if today is payday
    */
-  DailyCheck = 'daily-check',
+  WorkspacePlanCharge = 'workspace-plan-charge',
   /**
    * Plan changed event
    */
   PlanChanged = 'plan-changed',
-}
-
-/**
- * Tariff plan interface
- */
-export interface TariffPlan {
-  /**
-   * Plan name
-   */
-  name: string;
-
-  /**
-   * Monthly charge for current plan
-   */
-  monthlyCharge: number;
-
-  /**
-   * Event limits for current plan
-   */
-  eventsLimit: number;
-}
-
-/**
- * Plan object of workspace
- */
-export interface WorkspacePlan {
-  /**
-   * Plan name
-   */
-  name: string;
-
-  /**
-   * Last charge date timestamp
-   */
-  lastChargeDate: number;
-
-  /**
-   * Subscription date timestamp
-   */
-  subscriptionDate: number;
 }
 
 /**
@@ -74,8 +34,8 @@ export interface PaymasterEvent {
 /**
  * Daily check event interface
  */
-export interface DailyCheckEvent extends PaymasterEvent {
-  type: EventType.DailyCheck;
+export interface WorkspacePlanChargeEvent extends PaymasterEvent {
+  type: EventType.WorkspacePlanCharge;
   payload: DailyCheckEventPayload;
 }
 

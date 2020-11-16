@@ -4,10 +4,11 @@ import * as pkg from '../package.json';
 import asyncForEach from '../../../lib/utils/asyncForEach';
 import { Collection, Db, GridFSBucket, ObjectId } from 'mongodb';
 import axios from 'axios';
-import { Project, ReportDataByProject, ReportData, ReleaseRecord, ReleaseFileData } from './types';
+import { ReportDataByProject, ReportData, ReleaseRecord, ReleaseFileData } from './types';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
 import prettysize from 'prettysize';
+import { ProjectDBScheme } from 'hawk.types';
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
@@ -38,7 +39,7 @@ export default class ArchiverWorker extends Worker {
   /**
    * Collection with projects
    */
-  private projectCollection!: Collection<Project>;
+  private projectCollection!: Collection<ProjectDBScheme>;
 
   /**
    * Collection with Javascript releases
@@ -57,7 +58,7 @@ export default class ArchiverWorker extends Worker {
     this.eventsDbConnection = await this.eventsDb.connect();
     const accountDbConnection = await this.accountsDb.connect();
 
-    this.projectCollection = accountDbConnection.collection<Project>('projects');
+    this.projectCollection = accountDbConnection.collection<ProjectDBScheme>('projects');
     this.releasesCollection = this.eventsDbConnection.collection('releases-js');
 
     this.gridFsBucket = this.eventsDb.createGridFsBucket('releases-js');
@@ -118,7 +119,7 @@ export default class ArchiverWorker extends Worker {
    *
    * @param project - project data to remove events
    */
-  private async archiveProjectEvents(project: Project): Promise<number> {
+  private async archiveProjectEvents(project: ProjectDBScheme): Promise<number> {
     const maxDaysInSeconds = +process.env.MAX_DAYS_NUMBER * 24 * 60 * 60;
     const maxOldTimestamp = (new Date().getTime()) / 1000 - maxDaysInSeconds;
 
@@ -159,13 +160,17 @@ export default class ArchiverWorker extends Worker {
    */
   private async removeOldRepetitions(project: { _id: ObjectId }, maxOldTimestamp: number): Promise<number> {
     const repetitionsCollection = this.eventsDbConnection.collection('repetitions:' + project._id.toString());
-    const deleteRepetitionsResult = await repetitionsCollection.deleteMany({
+
+    const repetitionsBulk = repetitionsCollection.initializeUnorderedBulkOp();
+
+    repetitionsBulk.find({
       'payload.timestamp': {
         $lt: maxOldTimestamp,
       },
-    });
+    }).remove();
+    const deleteRepetitionsResult = await repetitionsBulk.execute();
 
-    return deleteRepetitionsResult.deletedCount || 0;
+    return deleteRepetitionsResult.nRemoved || 0;
   }
 
   /**
@@ -177,11 +182,14 @@ export default class ArchiverWorker extends Worker {
   private async removeOldDailyEvents(project: { _id: ObjectId }, maxOldTimestamp: number): Promise<void> {
     const dailyEventsCollection = this.eventsDbConnection.collection('dailyEvents:' + project._id.toString());
 
-    await dailyEventsCollection.deleteMany({
+    const dailyEventsBulk = dailyEventsCollection.initializeUnorderedBulkOp();
+
+    dailyEventsBulk.find({
       groupingTimestamp: {
         $lt: maxOldTimestamp,
       },
-    });
+    }).remove();
+    await dailyEventsBulk.execute();
   }
 
   /**
@@ -262,13 +270,17 @@ export default class ArchiverWorker extends Worker {
     const noDailyRecords = (events: AggregationResult): boolean => events.dailyEvent.length === 0;
 
     const groupHashesToRemove = result.filter(noDailyRecords).map(res => res.groupHash);
-    const deleteOriginalEventsResult = await eventsCollection.deleteMany({
+
+    const eventsBulk = eventsCollection.initializeUnorderedBulkOp();
+
+    eventsBulk.find({
       groupHash: {
         $in: groupHashesToRemove,
       },
-    });
+    }).remove();
+    const deleteOriginalEventsResult = await eventsBulk.execute();
 
-    return deleteOriginalEventsResult.deletedCount || 0;
+    return deleteOriginalEventsResult.nRemoved || 0;
   }
 
   /**
@@ -285,7 +297,7 @@ export default class ArchiverWorker extends Worker {
 
     reportData.projectsData.sort((a, b) => b.archivedEventsCount - a.archivedEventsCount);
 
-    let report = 'Hawk Archiver 📦️ \n';
+    let report = process.env.SERVER_NAME ? ` Hawk Archiver (${process.env.SERVER_NAME}) 📦️\n` : ' Hawk Archiver 📦️\n';
     let totalArchivedEventsCount = 0;
 
     reportData.projectsData.forEach(dataByProject => {
@@ -327,7 +339,7 @@ export default class ArchiverWorker extends Worker {
    *
    * @param project - project to handle
    */
-  private async removeOldReleases(project: Project): Promise<number> {
+  private async removeOldReleases(project: ProjectDBScheme): Promise<number> {
     const releasesToRemove = await this.releasesCollection
       .find({
         projectId: project._id.toString(),
@@ -363,14 +375,17 @@ export default class ArchiverWorker extends Worker {
       return acc;
     }, []);
 
-    const result = await this.releasesCollection.deleteMany({
+    const releasesBulk = this.releasesCollection.initializeUnorderedBulkOp();
+
+    releasesBulk.find({
       _id: {
         $in: releasesIdsToDelete,
       },
-    });
+    }).remove();
+    const result = await releasesBulk.execute();
 
-    this.logger.info(`Summary deleted releases for project ${project._id.toString()}: ${result.deletedCount}`);
+    this.logger.info(`Summary deleted releases for project ${project._id.toString()}: ${result.nRemoved}`);
 
-    return result.deletedCount;
+    return result.nRemoved;
   }
 }
