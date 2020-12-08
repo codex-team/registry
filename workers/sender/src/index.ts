@@ -1,14 +1,15 @@
-import { DecodedGroupedEvent, ProjectDBScheme } from 'hawk.types';
+import { DecodedGroupedEvent, ProjectDBScheme, UserDBScheme, GroupedEventDBScheme } from 'hawk.types';
 import { ObjectId } from 'mongodb';
 import { DatabaseController } from '../../../lib/db/controller';
 import { Worker } from '../../../lib/worker';
 import * as pkg from '../package.json';
 import './env';
 
-import { EventsTemplateVariables, TemplateEventData } from '../types/template-variables';
+import { TemplateEventData, NotificationTypes } from '../types/template-variables';
 import NotificationsProvider from './provider';
+
 import { ChannelType } from 'hawk-worker-notifier/types/channel';
-import { SenderWorkerTask } from 'hawk-worker-notifier/types/sender-task';
+import { SenderWorkerEventPayload, SenderWorkerAssigneePayload, SenderWorkerTask } from 'hawk-worker-notifier/types/sender-task';
 import { decodeUnsafeFields } from '../../../lib/utils/unsafeFields';
 
 /**
@@ -73,8 +74,11 @@ export default abstract class SenderWorker extends Worker {
    * Task handling function
    *
    * @param task - task to handle
+   * @param task.projectId - project events related to
+   * @param task.ruleId - notification Rule id that should be used for sending
+   * @param task.events - array contains events' group hashes and number of repetition for the last minPeriod
    */
-  public async handle({ projectId, ruleId, events }: SenderWorkerTask): Promise<void> {
+  public async handle<T extends SenderWorkerTask>(task: T): Promise<void> {
     if (!this.channelType) {
       throw new Error('channelType for Sender worker is not set');
     }
@@ -86,6 +90,21 @@ export default abstract class SenderWorker extends Worker {
     if (!this.provider.logger) {
       this.provider.setLogger(this.logger);
     }
+
+    if ('whoAssignedId' in task) {
+      return this.handleAssigneeTask(task as SenderWorkerAssigneePayload);
+    }
+
+    return this.handleEventTask(task as SenderWorkerEventPayload);
+  }
+
+  /**
+   * Handle event task
+   *
+   * @param task - task to handke
+   */
+  private async handleEventTask(task: SenderWorkerEventPayload): Promise<void> {
+    const { projectId, ruleId, events } = task;
 
     const project = await this.getProject(projectId);
 
@@ -107,7 +126,7 @@ export default abstract class SenderWorker extends Worker {
 
     const eventsData = await Promise.all(
       events.map(
-        async ({ key: groupHash, count }: {key: string; count: number}): Promise<TemplateEventData> => {
+        async ({ key: groupHash, count }: { key: string; count: number }): Promise<TemplateEventData> => {
           const [event, daysRepeated] = await this.getEventDataByGroupHash(projectId, groupHash);
 
           return {
@@ -119,13 +138,71 @@ export default abstract class SenderWorker extends Worker {
       )
     );
 
+    const notificationType = NotificationTypes.Event;
+
     this.provider.send(channel.endpoint, {
-      host: process.env.GARAGE_URL,
-      hostOfStatic: process.env.API_STATIC_URL,
-      project,
-      events: eventsData,
-      period: channel.minPeriod,
-    } as EventsTemplateVariables);
+      type: NotificationTypes.Event,
+      payload: {
+        host: process.env.GARAGE_URL,
+        hostOfStatic: process.env.API_STATIC_URL,
+        project,
+        events: eventsData,
+        period: channel.minPeriod,
+      },
+    });
+  }
+
+  /**
+   * Handle task when someone was assigned
+   *
+   * @param task - task to handle
+   */
+  private async handleAssigneeTask(task: SenderWorkerAssigneePayload): Promise<void> {
+    const { assigneeId, projectId, whoAssignedId, eventId } = task;
+
+    const project = await this.getProject(projectId);
+
+    if (!project || !project.notifications) {
+      return;
+    }
+
+    const [event, daysRepeated] = await this.getEventData(projectId, eventId);
+
+    if (!event) {
+      return;
+    }
+
+    const whoAssigned = await this.getUser(whoAssignedId);
+
+    if (!whoAssigned) {
+      return;
+    }
+
+    const assignee = await this.getUser(assigneeId);
+
+    if (!assignee) {
+      return;
+    }
+
+    const channels = assignee.notifications.channels;
+
+    for (const channel in channels) {
+      if (!channels[channel].isEnabled) {
+        continue;
+      }
+
+      this.provider.send(channels[channel].endpoint, {
+        type: NotificationTypes.Assignee,
+        payload: {
+          host: process.env.GARAGE_URL,
+          hostOfStatic: process.env.API_STATIC_URL,
+          project,
+          event,
+          whoAssigned,
+          daysRepeated,
+        },
+      });
+    }
   }
 
   /**
@@ -133,8 +210,6 @@ export default abstract class SenderWorker extends Worker {
    *
    * @param {string} projectId - project events are related to
    * @param {string} groupHash - event group hash
-   *
-   * @returns {Promise<[GroupedEventDBScheme, number]>}
    */
   private async getEventDataByGroupHash(
     projectId: string,
@@ -154,6 +229,25 @@ export default abstract class SenderWorker extends Worker {
   }
 
   /**
+   * Get event data by projectId and eventId
+   *
+   * @param projectId - project id of the event
+   * @param eventId - id of the event
+   */
+  private async getEventData(projectId: string, eventId: string): Promise<[GroupedEventDBScheme, number]> {
+    const connection = await this.eventsDb.getConnection();
+
+    const event = await connection.collection(`events:${projectId}`).findOne({
+      _id: new ObjectId(eventId),
+    });
+    const daysRepeated = await connection.collection(`dailyEvents:${projectId}`).countDocuments({
+      groupHash: event.groupHash,
+    });
+
+    return [event, daysRepeated];
+  }
+
+  /**
    * Get project info
    *
    * @param {string} projectId - project id
@@ -163,5 +257,16 @@ export default abstract class SenderWorker extends Worker {
     const connection = await this.accountsDb.getConnection();
 
     return connection.collection('projects').findOne({ _id: new ObjectId(projectId) });
+  }
+
+  /**
+   * Get user data
+   *
+   * @param userId - user id
+   */
+  private async getUser(userId: string): Promise<UserDBScheme | null> {
+    const connection = await this.accountsDb.getConnection();
+
+    return connection.collection('users').findOne({ _id: new ObjectId(userId) });
   }
 }

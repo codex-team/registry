@@ -1,6 +1,6 @@
 import * as nodemailer from 'nodemailer';
 import * as Twig from 'twig';
-import type { TemplateVariables, EventsTemplateVariables } from 'hawk-worker-sender/types/template-variables';
+import { AllNotifications, TemplateVariables, NotificationTypes } from 'hawk-worker-sender/types/template-variables';
 import templates, { Template } from './templates';
 import NotificationsProvider from 'hawk-worker-sender/src/provider';
 import * as utils from '../../../lib/utils';
@@ -30,27 +30,40 @@ export default class EmailProvider extends NotificationsProvider {
    * 'as any' used because @types/nodemailer doesn't match the docs
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private transporter = nodemailer.createTransport(this.smtpConfig as {[key: string]: any});
+  private transporter = nodemailer.createTransport(this.smtpConfig as { [key: string]: any });
 
   /**
    * Send email to recipient
    *
    * @param {string} to - recipient email
-   * @param {TemplateVariables} variables - variables for template
+   * @param {TemplateVariables} variables - variables wrapped in a payload with type
    */
-  public async send(to: string, variables: EventsTemplateVariables): Promise<void> {
+  public async send(to: string, variables: AllNotifications): Promise<void> {
     let templateName: Templates;
 
-    if (variables.events.length === 1) {
+    if (variables?.type == NotificationTypes.Event) {
       templateName = Templates.NewEvent;
-    } else {
+    } else if (variables?.type == NotificationTypes.SeveralEvents) {
       templateName = Templates.SeveralEvents;
+    } else if (variables?.type == NotificationTypes.Assignee) {
+      templateName = Templates.Assignee;
     }
 
+    this.sendNotification(to, variables, templateName);
+  }
+
+  /**
+   * Send notification to user email
+   *
+   * @param to - recipient email. Person who was assigned to solve the issue
+   * @param variables - variables for template
+   * @param templateName - name of the template to render
+   */
+  public async sendNotification(to: string, variables: AllNotifications, templateName: Templates): Promise<void> {
     let content: Template;
 
     try {
-      content = await this.render(templateName, variables);
+      content = await this.render(templateName, variables.payload);
     } catch (e) {
       this.logger.error(`Failed to render ${templateName} template `, e);
 
@@ -71,7 +84,7 @@ export default class EmailProvider extends NotificationsProvider {
       await this.transporter.sendMail(mailOptions);
     } catch (e) {
       this.logger.error(
-        'Error sending letter. Try to check the environment settings (in .env file).', e.message
+        'Error sending letter. Try to check the environment settings (in .env file).', e
       );
 
       utils.sendReport('📮 Email worker\n\n' + (e.message || e.toString()));
@@ -98,7 +111,7 @@ export default class EmailProvider extends NotificationsProvider {
       return new Promise(
         (resolve, reject) => Twig.renderFile(
           template[key as keyof Template],
-          // eslint-disable-next-line @typescript-eslint/ban-ts-ignore
+          // eslint-disable-next-line @typescript-eslint/ban-ts-comment
           // @ts-ignore because @types/twig doesn't match the docs
           variables,
           (err: Error, res: string): void => {
