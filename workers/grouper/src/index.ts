@@ -27,14 +27,14 @@ export default class GrouperWorker extends Worker {
   public readonly type: string = pkg.workerType;
 
   /**
-   * Database Controller
-   */
-  private db: DatabaseController = new DatabaseController(process.env.MONGO_EVENTS_DATABASE_URI);
-
-  /**
    * Memoized Hashing computation
    */
   private static cachedHashValues: {[key: string]: string} = {};
+
+  /**
+   * Database Controller
+   */
+  private db: DatabaseController = new DatabaseController(process.env.MONGO_EVENTS_DATABASE_URI);
 
   /**
    * Get unique hash from event data
@@ -51,7 +51,6 @@ export default class GrouperWorker extends Worker {
     }
 
     return this.cachedHashValues[computedHashValueCacheKey];
-
   }
 
   /**
@@ -184,6 +183,13 @@ export default class GrouperWorker extends Worker {
   }
 
   /**
+   * Forced clears worker cache
+   */
+  public clearCache(): void {
+    this.cache.flushAll();
+  }
+
+  /**
    * Decides whether to increase the number of affected users.
    *
    * @param task - worker task to process
@@ -201,13 +207,13 @@ export default class GrouperWorker extends Worker {
       return false;
     } else {
       const repetitionCacheKey = `repetitions:${task.projectId}:${existedEvent.groupHash}:${eventUser.id}`;
-      const repetition = this.cache.get(repetitionCacheKey, () => {
+      const repetition = await this.cache.get(repetitionCacheKey, async () => {
         return this.db.getConnection().collection(`repetitions:${task.projectId}`)
           .findOne({
             groupHash: existedEvent.groupHash,
             'payload.user.id': eventUser.id,
           });
-      })
+      });
 
       /**
        * If there is no repetitions from this user — return true
@@ -227,14 +233,15 @@ export default class GrouperWorker extends Worker {
       throw new ValidationError('Controller.saveEvent: Project ID is invalid or missed');
     }
 
-    const eventCacheKey = `${projectId}:${query.toString()}`
-    return this.cache.get(eventCacheKey, () => {
+    const eventCacheKey = `${projectId}:${query.toString()}`;
+
+    return this.cache.get(eventCacheKey, async () => {
       return this.db.getConnection()
         .collection(`events:${projectId}`)
         .findOne(query)
         .catch((err) => {
           throw new DatabaseReadWriteError(err);
-        })
+        });
     });
   }
 
@@ -316,7 +323,7 @@ export default class GrouperWorker extends Worker {
   }
 
   /**
-   * saves event at the special aggregation collection
+   * Saves event at the special aggregation collection
    *
    * @param {string} projectId - project's identifier
    * @param {string} eventHash - event hash
