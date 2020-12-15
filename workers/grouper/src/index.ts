@@ -29,7 +29,7 @@ export default class GrouperWorker extends Worker {
   /**
    * Memoized Hashing computation
    */
-  private static cachedHashValues: {[key: string]: string} = {};
+  private static cachedHashValues: { [key: string]: string } = {};
 
   /**
    * Database Controller
