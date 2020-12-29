@@ -39,6 +39,7 @@ const workspace: WorkspaceDBScheme = {
   tariffPlanId: plan._id,
   lastChargeDate: new Date('2005-11-22'),
   accountId: '34562453',
+  billingPeriodEventsCount: 0,
 };
 
 describe('PaymasterWorker', () => {
@@ -203,6 +204,30 @@ describe('PaymasterWorker', () => {
       status: BusinessOperationStatus.Confirmed,
       dtCreated: new Date('2005-12-25'),
     } as BusinessOperationDBScheme));
+
+    MockDate.reset();
+  });
+
+  test('Should update lastChargeDate if workspace plan is free', async () => {
+    MockDate.set(mockedDate);
+
+    /**
+     * Change tariff plan for mocked workspace for this test
+     */
+    await workspacesCollection.updateOne({ _id: workspace._id }, {
+      $set: {
+        tariffPlanId: freePlan._id,
+      },
+    });
+
+    await worker.handle({
+      type: EventType.WorkspacePlanCharge,
+      payload: undefined,
+    });
+
+    const updatedWorkspace = await workspacesCollection.findOne({ _id: workspace._id });
+
+    expect(updatedWorkspace.lastChargeDate).toEqual(mockedDate);
 
     MockDate.reset();
   });
