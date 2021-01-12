@@ -27,6 +27,16 @@ export default class GrouperWorker extends Worker {
   public readonly type: string = pkg.workerType;
 
   /**
+   * Contains hashed events by his catcher type and event title as keys
+   *
+   * @example
+   * {
+   *   'grouper:Hawk client catcher test': '7e2b961c35b915dcbe2704e144e8d2c3517e2c5281a5de4403c0c58978b435a0'
+   * }
+   */
+  private static cachedHashValues: Record<string, string> = {};
+
+  /**
    * Database Controller
    */
   private db: DatabaseController = new DatabaseController(process.env.MONGO_EVENTS_DATABASE_URI);
@@ -223,12 +233,12 @@ export default class GrouperWorker extends Worker {
    * @param projectId - project's identifier
    * @param query - mongo query string
    */
-  private async getEvent(projectId: string, query): Promise<GroupedEventDBScheme> {
+  private async getEvent(projectId: string, query: Record<string, unknown>): Promise<GroupedEventDBScheme> {
     if (!mongodb.ObjectID.isValid(projectId)) {
       throw new ValidationError('Controller.saveEvent: Project ID is invalid or missed');
     }
 
-    const eventCacheKey = `${projectId}:${query.toString()}`;
+    const eventCacheKey = `${projectId}:${JSON.stringify(query)}`;
 
     return this.cache.get(eventCacheKey, async () => {
       return this.db.getConnection()
