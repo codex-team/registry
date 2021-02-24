@@ -27,7 +27,7 @@ export default class GrouperWorker extends Worker {
   public readonly type: string = pkg.workerType;
 
   /**
-   * Contains hashed events by his catcher type and event title as keys
+   * Contains event grouphashes by its catcher type and event title as keys
    *
    * @example
    * {
@@ -185,13 +185,6 @@ export default class GrouperWorker extends Worker {
         },
       });
     }
-  }
-
-  /**
-   * Forced clears worker cache
-   */
-  public clearCache(): void {
-    this.cache.flushAll();
   }
 
   /**
